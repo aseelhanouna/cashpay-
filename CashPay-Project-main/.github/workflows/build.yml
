@@ -1,12 +1,12 @@
 name: Flutter Build APK
 
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+on: [push, pull_request] # سيشتغل تلقائياً فوراً عند أي رفع
+
+jobs:
+  build:
+    name: Build Flutter APK
+    runs-on: ubuntu-latest
+
 
 jobs:
   build:
