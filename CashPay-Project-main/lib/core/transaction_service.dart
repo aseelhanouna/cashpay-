@@ -1,0 +1,138 @@
+import 'dart:convert';
+import 'dart:math';
+import 'package:flutter/foundation.dart';
+import '../data/database_helper.dart';
+import '../core/session_manager.dart';
+import '../security/crypto_helper.dart';
+import '../core/piggy_bank_service.dart';
+
+class TransactionService {
+
+  /// يعيد بيانات رمز الـ QR (نفس الصيغة كما كانت) بالإضافة إلى المبلغ الذي
+  /// تم اقتطاعه تلقائياً لصالح الحصالة الذكية (0 إن لم يوجد هدف نشط بنسبة مئوية).
+  static Future<({String qrData, double piggyCut})> generateTransferToken({
+    required int senderId,
+    required double amount,
+  }) async {
+
+    if (await SessionManager.isBlocked()) {
+      throw Exception("التطبيق مقفل مؤقتاً");
+    }
+
+    await checkFraudLimit(senderId);
+
+    final db = DatabaseHelper.instance;
+    
+
+    final String txId =
+        "TX_${senderId}_${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(99999)}";
+    final int timestamp = DateTime.now().millisecondsSinceEpoch;
+    final String amountStr = amount.toStringAsFixed(2);
+
+    final String rawData = CryptoHelper.buildRawData(
+      txId: txId,
+      senderId: senderId,
+      amountStr: amountStr,
+      timestamp: timestamp,
+    );
+
+    final String signature = CryptoHelper.sign(rawData, senderId);
+
+final balance = await db.getUserBalance(senderId);
+if (balance < amount) {
+  throw Exception("الرصيد غير كافي");
+}
+
+await db.updateBalance(senderId, -amount);
+
+await db.saveCompletedOutgoingTransaction(
+  txId: txId,
+  senderId: senderId,
+  amount: amount,
+  signature: signature,
+  timestamp: timestamp,
+);
+
+debugPrint("Transaction generated: $txId | amount: $amountStr");
+
+double piggyCut = 0.0;
+try {
+  piggyCut = await PiggyBankService.applyAutoSaveOnPayment(
+    userId: senderId,
+    paymentAmount: amount,
+  );
+} catch (e) {
+  // لا نفشل عملية التحويل الأساسية بسبب خطأ بالاستقطاع التلقائي للحصالة
+  debugPrint("Piggy auto-save error (ignored): $e");
+}
+
+final String qrData = jsonEncode({
+  "tx_id": txId,
+  "sender_id": senderId,
+  "amount": amountStr,
+  "timestamp": timestamp,
+  "signature": signature,
+});
+
+return (qrData: qrData, piggyCut: piggyCut);
+  }
+
+  static Future<void> processReceivedToken(
+    Map<String, dynamic> tokenData,
+    int currentUserId,
+  ) async {
+    final int timestamp = int.tryParse(tokenData['timestamp'].toString()) ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if ((now - timestamp).abs() > 5 * 60 * 1000) {
+      throw Exception("انتهت صلاحية الرمز");
+    }
+
+    final int senderId = int.tryParse(tokenData['sender_id'].toString()) ?? 0;
+    final String amountStr =
+        double.parse(tokenData['amount'].toString()).toStringAsFixed(2);
+    final String txId = tokenData['tx_id'].toString().trim();
+    final String signature = tokenData['signature'].toString().trim();
+
+    if (txId.isEmpty || senderId <= 0) {
+      throw Exception("بيانات الرمز ناقصة");
+    }
+
+    final String rawData = CryptoHelper.buildRawData(
+      txId: txId,
+      senderId: senderId,
+      amountStr: amountStr,
+      timestamp: timestamp,
+    );
+
+    if (!CryptoHelper.verify(rawData, signature, senderId)) {
+      await SessionManager.applyFraudBlock();
+      throw Exception("فشل التحقق من التوقيع");
+    }
+
+    try {
+      await DatabaseHelper.instance.receiveTokens(
+        txId: txId,
+        senderId: senderId,
+        receiverId: currentUserId,
+        amount: double.parse(amountStr),
+        signature: signature,
+        timestamp: timestamp,
+      );
+    } on Exception catch (e) {
+      debugPrint("receiveTokens failed: $e");
+      rethrow;
+    }
+  }
+
+  static Future<void> checkFraudLimit(int userId) async {
+    final count = await DatabaseHelper.instance.countRecentTransactions(userId);
+    if (count >= 5) {
+      await DatabaseHelper.instance.logFraud(
+        "FRAUD_MULTI_TX_${userId}_${DateTime.now().millisecondsSinceEpoch}",
+        "نشاط مكثف في وقت قصير (أكثر من 5 عمليات)",
+      );
+      await SessionManager.applyFraudBlock();
+      throw Exception("تم حظرك مؤقتاً بسبب نشاط مشبوه");
+    }
+  }
+}
