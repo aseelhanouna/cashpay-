@@ -17,11 +17,11 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Set up Flutter SDK
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.27.0' 
           channel: 'stable'
-          flutter-version: '3.22.0'
 
       - name: Get Flutter Dependencies
         working-directory: CashPay-Project-main
@@ -36,4 +36,3 @@ jobs:
         with:
           name: CashPay-Debug-APK
           path: CashPay-Project-main/build/app/outputs/flutter-apk/app-debug.apk
-          
